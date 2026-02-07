@@ -508,3 +508,190 @@ elif len(meas_curves) == 0:
         f"- **Dark fit:** Rs = {Rs_fit:.3f} Ω,  Rsh = {Rsh_fit:.1f} Ω  \n"
         f"- **Light‑derived (synth):** see values above."
     )
+
+# ======================================================
+# IEC 60891 Rs (multi‑IV) — Procedure 1, multi-curve fit
+# ======================================================
+st.header("IEC 60891 Rs (multi‑IV)")
+
+st.markdown(
+    "Upload a CSV with **multiple measured light I–V curves** and their conditions. "
+    "Required columns: `SweepID, V_V, I_A, G_Wm2, T_C`. "
+    "The app translates each curve to **target (G2, T2)** with **IEC 60891 Procedure 1** "
+    "and estimates a **global Rs** (and optionally κ) that minimizes cross‑curve mismatch."
+)
+
+iv60891_file = st.file_uploader("IEC 60891 multi‑IV CSV", type=["csv"], key="iv60891")
+
+col60891a, col60891b, col60891c = st.columns(3)
+with col60891a:
+    G2 = st.number_input("Target irradiance G₂ (W/m²)", value=1000.0, step=10.0, min_value=100.0)
+with col60891b:
+    T2 = st.number_input("Target temperature T₂ (°C)", value=25.0, step=0.5)
+with col60891c:
+    I_grid_pts = st.number_input("Interpolation points (I-grid)", value=200, min_value=50, max_value=2000, step=50)
+
+st.subheader("60891 parameters")
+colP1, colP2, colP3 = st.columns(3)
+with colP1:
+    alpha_Isc = st.number_input("α (A/°C) — Isc temp. coeff.", value=0.0005, format="%.6f",
+                                help="Module Isc temperature coefficient (absolute, A/°C)")
+with colP2:
+    beta_Voc = st.number_input("β (V/°C) — Voc temp. coeff.", value=-0.10, format="%.4f",
+                               help="Module Voc temperature coefficient (absolute, V/°C)")
+with colP3:
+    fit_kappa = st.checkbox("Also fit κ (curve correction)", value=False)
+
+kappa_init = st.number_input("Initial κ (V/A/°C)", value=0.0, step=0.001, format="%.4f",
+                             help="Set 0 if unknown; enable the κ toggle above to co-fit.")
+
+run_60891 = st.button("Estimate Rs (IEC 60891)")
+
+def _interp_to_grid(I2, V2, I_grid):
+    # monotonic guard: sort by I2
+    idx = np.argsort(I2)
+    I2s, V2s = I2[idx], V2[idx]
+    # restrict to grid within range
+    mask = (I_grid >= I2s.min()) & (I_grid <= I2s.max())
+    Vg = np.full_like(I_grid, np.nan, dtype=float)
+    if mask.any():
+        Vg[mask] = np.interp(I_grid[mask], I2s, V2s)
+    return Vg
+
+def _translate_proc1(df_sweep, Rs, kappa, alpha, beta, G2, T2):
+    """
+    IEC 60891 Procedure 1 translation for one sweep.
+    Inputs: df_sweep must have columns V_V, I_A, G_Wm2, T_C (float)
+    Returns I2, V2 (translated to G2,T2).
+    """
+    V1 = df_sweep["V_V"].to_numpy(dtype=float)
+    I1 = df_sweep["I_A"].to_numpy(dtype=float)
+    G1 = df_sweep["G_Wm2"].to_numpy(dtype=float)
+    T1 = df_sweep["T_C"].to_numpy(dtype=float)
+
+    # Estimate Isc1 per sweep (use max current near V≈0; here: simply max current)
+    Isc1 = np.nanmax(I1)
+
+    # Current translation (independent of Rs)
+    I2 = I1 + Isc1 * (np.clip(G2,1e-3,None)/np.clip(G1,1e-3,None) - 1.0) + alpha * (T2 - T1)
+
+    # Voltage translation (depends on Rs, κ, β)
+    V2 = V1 - Rs * (I2 - I1) - kappa * I2 * (T2 - T1) + beta * (T2 - T1)
+    return I2, V2
+
+if run_60891:
+    if iv60891_file is None:
+        st.error("Please upload the multi‑IV CSV first.")
+        st.stop()
+
+    try:
+        dff = pd.read_csv(iv60891_file)
+    except Exception as e:
+        st.error(f"CSV read error: {e}")
+        st.stop()
+
+    required_cols = {"SweepID", "V_V", "I_A", "G_Wm2", "T_C"}
+    if not required_cols.issubset(set(dff.columns)):
+        st.error(f"CSV must contain columns: {sorted(required_cols)}")
+        st.stop()
+
+    # Prepare groups
+    groups = dff.groupby("SweepID", dropna=False)
+    sweeps = []
+    for gid, g in groups:
+        g = g.copy()
+        # sort by current to get consistent interpolation later
+        g.sort_values(by=["I_A","V_V"], inplace=True)
+        sweeps.append((gid, g))
+
+    if len(sweeps) < 2:
+        st.error("Need at least 2 measured I–V curves (preferably ≥3) for a robust 60891 Rs.")
+        st.stop()
+
+    # I-grid for cross-curve variance metric (use common overlapping current domain later)
+    # Build preliminary translated currents to get a safe grid range using initial guesses.
+    Rs0 = float(Rs_fit) if "Rs_fit" in globals() else 0.15
+    kap0 = float(kappa_init)
+    I2_ranges = []
+    for _, g in sweeps:
+        I2p, _ = _translate_proc1(g, Rs0, kap0, alpha_Isc, beta_Voc, G2, T2)
+        I2_ranges.append((np.nanmin(I2p), np.nanmax(I2p)))
+    I_min = np.max([a for a, _ in I2_ranges])
+    I_max = np.min([b for _, b in I2_ranges])
+    if not np.isfinite(I_min) or not np.isfinite(I_max) or I_max <= I_min:
+        st.error("Translated curves have no common current range — check inputs (G,T,coefficients).")
+        st.stop()
+
+    I_grid = np.linspace(I_min, I_max, int(I_grid_pts))
+
+    # Loss function: translate each sweep to (G2,T2), interpolate V2 on I_grid,
+    # then compute variance (or MSE vs the mean) of V2 across curves.
+    def loss_Rs_kappa(Rs, kappa):
+        if Rs < 0 or not np.isfinite(Rs) or not np.isfinite(kappa):
+            return 1e99
+        V_stack = []
+        for _, g in sweeps:
+            I2, V2 = _translate_proc1(g, Rs, kappa, alpha_Isc, beta_Voc, G2, T2)
+            Vg = _interp_to_grid(I2, V2, I_grid)
+            V_stack.append(Vg)
+        V_stack = np.vstack(V_stack)  # shape: n_sweeps × n_grid
+        # Use rows that are valid across all sweeps
+        valid = np.all(np.isfinite(V_stack), axis=0)
+        if not np.any(valid):
+            return 1e99
+        Vs = V_stack[:, valid]
+        meanV = np.nanmean(Vs, axis=0, keepdims=True)
+        # SSE across curves relative to the mean at each grid point
+        sse = np.nansum((Vs - meanV) ** 2)
+        # Keep Rs in a plausible band (soft regularization)
+        reg = 0.0
+        return float(sse + reg)
+
+    # Optimize Rs (and optionally κ): lightweight randomized search around initial guesses
+    best = (Rs0, kap0)
+    bestL = loss_Rs_kappa(best[0], best[1])
+    rng = np.random.default_rng(2026)
+    trials = 600 if fit_kappa else 400
+
+    for _ in range(trials):
+        if fit_kappa:
+            t_Rs = max(0.0, best[0] + rng.normal(0, 0.02))
+            t_k  = best[1] + rng.normal(0, 0.002)
+        else:
+            t_Rs = max(0.0, best[0] + rng.normal(0, 0.02))
+            t_k  = kap0
+        L = loss_Rs_kappa(t_Rs, t_k)
+        if np.isfinite(L) and L < bestL:
+            best, bestL = (t_Rs, t_k), L
+
+    Rs_iec, kappa_iec = best
+    st.success(f"**IEC 60891 estimate:**  Rs ≈ {Rs_iec:.4f} Ω" + (f",  κ ≈ {kappa_iec:.4f} V/A/°C" if fit_kappa else ""))
+
+    # Plot the collapsed, translated curves
+    figC, axC = plt.subplots(figsize=(6.6, 4.2))
+    colors = ["tab:blue","tab:orange","tab:green","tab:red","tab:purple","tab:brown"]
+    for i, (gid, g) in enumerate(sweeps):
+        I2, V2 = _translate_proc1(g, Rs_iec, kappa_iec, alpha_Isc, beta_Voc, G2, T2)
+        axC.plot(I2, V2, lw=2, color=colors[i % len(colors)], label=f"{gid}")
+    axC.set_xlabel("Current I₂ (A) @ target"); axC.set_ylabel("Voltage V₂ (V) @ target")
+    axC.set_title(f"IEC 60891 Proc‑1 translation to (G₂={G2:.0f} W/m², T₂={T2:.1f} °C)")
+    axC.grid(alpha=0.3); axC.legend(ncol=2, fontsize=9)
+    st.pyplot(figC)
+
+    # Export translated curves
+    out_rows = []
+    for gid, g in sweeps:
+        I2, V2 = _translate_proc1(g, Rs_iec, kappa_iec, alpha_Isc, beta_Voc, G2, T2)
+        tmp = pd.DataFrame({"SweepID": gid, "I2_A": I2, "V2_V": V2})
+        out_rows.append(tmp)
+    df_out = pd.concat(out_rows, ignore_index=True)
+    st.download_button("Download translated curves (CSV)",
+                       df_out.to_csv(index=False).encode("utf-8"),
+                       file_name="IEC60891_translated_IV.csv", mime="text/csv")
+
+    st.caption(
+        "Notes: This implements **IEC 60891 Procedure 1** translations to a common target and "
+        "estimates **Rs** by minimizing the variance among the translated curves on a shared current grid. "
+        "Set **α (Isc temp. coeff.)** and **β (Voc temp. coeff.)** per your module type. "
+        "For full normative details (and alternative Rs methods), see the 2021 Ed.3 and its annex."
+    )
