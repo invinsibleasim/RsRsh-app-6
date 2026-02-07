@@ -673,7 +673,8 @@ if run_60891:
     for i, (gid, g) in enumerate(sweeps):
         I2, V2 = _translate_proc1(g, Rs_iec, kappa_iec, alpha_Isc, beta_Voc, G2, T2)
         axC.plot(I2, V2, lw=2, color=colors[i % len(colors)], label=f"{gid}")
-    axC.set_xlabel("Current I₂ (A) @ target"); axC.set_ylabel("Voltage V₂ (V) @ target")
+    #axC.set_xlabel("Current I₂ (A) @ target"); axC.set_ylabel("Voltage V₂ (V) @ target")
+    axC.set_xlabel("Voltage V₂ (V) @ target"); axC.set_ylabel("Current I₂ (A) @ target")
     axC.set_title(f"IEC 60891 Proc‑1 translation to (G₂={G2:.0f} W/m², T₂={T2:.1f} °C)")
     axC.grid(alpha=0.3); axC.legend(ncol=2, fontsize=9)
     st.pyplot(figC)
