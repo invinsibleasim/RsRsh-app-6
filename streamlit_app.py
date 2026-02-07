@@ -573,7 +573,7 @@ def _translate_proc1(df_sweep, Rs, kappa, alpha, beta, G2, T2):
     Isc1 = np.nanmax(I1)
 
     # Current translation (independent of Rs)
-    I2 = I1 + Isc1 * (np.clip(G2,1e-3,None)/np.clip(G1,1e-3,None) - 1.0) + alpha * (T2 - T1)
+    I2 = I1 + Isc1 * (np.clip(G2, 1e-3, None) / np.clip(G1, 1e-3, None) - 1.0) + alpha * (T2 - T1)
 
     # Voltage translation (depends on Rs, κ, β)
     V2 = V1 - Rs * (I2 - I1) - kappa * I2 * (T2 - T1) + beta * (T2 - T1)
@@ -601,7 +601,7 @@ if run_60891:
     for gid, g in groups:
         g = g.copy()
         # sort by current to get consistent interpolation later
-        g.sort_values(by=["I_A","V_V"], inplace=True)
+        g.sort_values(by=["I_A", "V_V"], inplace=True)
         sweeps.append((gid, g))
 
     if len(sweeps) < 2:
@@ -635,7 +635,7 @@ if run_60891:
             Vg = _interp_to_grid(I2, V2, I_grid)
             V_stack.append(Vg)
         V_stack = np.vstack(V_stack)  # shape: n_sweeps × n_grid
-        # Use rows that are valid across all sweeps
+        # Use grid points that are valid across all sweeps
         valid = np.all(np.isfinite(V_stack), axis=0)
         if not np.any(valid):
             return 1e99
@@ -643,9 +643,7 @@ if run_60891:
         meanV = np.nanmean(Vs, axis=0, keepdims=True)
         # SSE across curves relative to the mean at each grid point
         sse = np.nansum((Vs - meanV) ** 2)
-        # Keep Rs in a plausible band (soft regularization)
-        reg = 0.0
-        return float(sse + reg)
+        return float(sse)
 
     # Optimize Rs (and optionally κ): lightweight randomized search around initial guesses
     best = (Rs0, kap0)
@@ -667,19 +665,23 @@ if run_60891:
     Rs_iec, kappa_iec = best
     st.success(f"**IEC 60891 estimate:**  Rs ≈ {Rs_iec:.4f} Ω" + (f",  κ ≈ {kappa_iec:.4f} V/A/°C" if fit_kappa else ""))
 
-    # Plot the collapsed, translated curves
+    # ---------------------------
+    # UPDATED PLOT ORIENTATION
+    # Voltage on X-axis, Current on Y-axis
+    # ---------------------------
     figC, axC = plt.subplots(figsize=(6.6, 4.2))
-    colors = ["tab:blue","tab:orange","tab:green","tab:red","tab:purple","tab:brown"]
+    colors = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple", "tab:brown"]
     for i, (gid, g) in enumerate(sweeps):
         I2, V2 = _translate_proc1(g, Rs_iec, kappa_iec, alpha_Isc, beta_Voc, G2, T2)
-        axC.plot(I2, V2, lw=2, color=colors[i % len(colors)], label=f"{gid}")
-    #axC.set_xlabel("Current I₂ (A) @ target"); axC.set_ylabel("Voltage V₂ (V) @ target")
-    axC.set_xlabel("Voltage V₂ (V) @ target"); axC.set_ylabel("Current I₂ (A) @ target")
+        axC.plot(V2, I2, lw=2, color=colors[i % len(colors)], label=f"{gid}")  # <-- V on X, I on Y
+    axC.set_xlabel("Voltage V₂ (V) @ target")
+    axC.set_ylabel("Current I₂ (A) @ target")
     axC.set_title(f"IEC 60891 Proc‑1 translation to (G₂={G2:.0f} W/m², T₂={T2:.1f} °C)")
-    axC.grid(alpha=0.3); axC.legend(ncol=2, fontsize=9)
+    axC.grid(alpha=0.3)
+    axC.legend(ncol=2, fontsize=9)
     st.pyplot(figC)
 
-    # Export translated curves
+    # Export translated curves (unchanged)
     out_rows = []
     for gid, g in sweeps:
         I2, V2 = _translate_proc1(g, Rs_iec, kappa_iec, alpha_Isc, beta_Voc, G2, T2)
@@ -694,5 +696,5 @@ if run_60891:
         "Notes: This implements **IEC 60891 Procedure 1** translations to a common target and "
         "estimates **Rs** by minimizing the variance among the translated curves on a shared current grid. "
         "Set **α (Isc temp. coeff.)** and **β (Voc temp. coeff.)** per your module type. "
-        "For full normative details (and alternative Rs methods), see the 2021 Ed.3 and its annex."
+        "For full normative details (and alternative Rs methods), see IEC 60891:2021 (Ed.3)."
     )
